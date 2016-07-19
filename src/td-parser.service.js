@@ -2,20 +2,9 @@ angular.module("wot").factory('TdParser', ['$http', 'CoAP',
     function TdParserFactory($http, CoAP) {
         var TdParser = {};
 
-        var numericTypes = [
-            'xsd:byte',
-            'xsd:float',
-            'xsd:decimal',
-            'xsd:int',
-            'xsd:long',
-            'xsd:unsignedByte',
-            'xsd:unsignedShort'
-        ];
-
-        TdParser.isNumericType = function isNumericType(xsdType) {
-            return numericTypes.indexOf(xsdType) != -1;
-        }
+       
         
+       
         var createThingfromOldTd =  function createThingfromOldTd(parsedTd) {
             var newThing = {
                 'name': parsedTd.metadata.name,
@@ -37,10 +26,8 @@ angular.module("wot").factory('TdParser', ['$http', 'CoAP',
                         'xsdType': property.outputData,
                         'autoUpdate': false,
                         'history': [],
-                        'parent': newThing,
-                        'isNumeric': function isNumeric() {
-                            return isNumericType(this.xsdType);
-                        }
+                        'parent': newThing
+                        
                     });
                 });
 
@@ -86,38 +73,48 @@ angular.module("wot").factory('TdParser', ['$http', 'CoAP',
         var createThingfromNewTd =  function createThingfromNewTd(parsedTd) {
             var uriArray = ( parsedTd.uris instanceof Array ) ? parsedTd.uris : [parsedTd.uris];
             var uriIndex = chooseUriIndex(uriArray);
+            
             if(uriIndex === -1) throw Error("no suitable Protocols found")
+            
             var newThing = {
                 'name': parsedTd.name,
                 'properties': [],
                 'actions': [],
-                'uri': uriArray[uriIndex]
+                'uri': uriArray[uriIndex],
+				'context' : parsedTd['@context']
             };
 
             //add all properties
             if(parsedTd.properties) parsedTd.properties
                 .forEach(function addProperty(property) {
+                    
                     newThing.properties.push({
                         'name': property.name,
                         'writable': property.writable,
-                        'xsdType': property.valueType,
+                        'type': property.valueType,
                         'uri': pathConcat(newThing.uri,property.hrefs[uriIndex]),
                         'autoUpdate': false,
+						'unit' : property.unit,
                         'history': [],
                         'parent': newThing,
-                        'isNumeric': function isNumeric() {
-                            return TdParser.isNumericType(this.xsdType);
-                        }
+                        'properties': property.valueType['properties']
                     });
+                 
+                    
+                
                 });
-
+            
             //add actions
             if(parsedTd.actions) parsedTd.actions
                 .forEach(function addAction(action) {
+                     var paramType = (action.inputData) ? action.inputData.valueType['type'] :"";
+                    
                     newThing.actions.push({
                         'name': action.name,
-                        'xsdParamType': (action.inputData) ? action.inputData.valueType : "",
-                        'xsdReturnType': (action.outputData)? action.outputData.valueType : "",
+                        'xsdParamType': paramType,
+						'type': (action.inputData) ? action.inputData.valueType : "",
+                        'inputProperties':(action.inputData) ? action.inputData.valueType['properties'] :"",
+                        'xsdReturnType': (action.outputData)? action.outputData.valueType['type'] : "",
                         'parent': newThing,
                         'uri' : pathConcat(newThing.uri,action.hrefs[uriIndex])
                     });
@@ -132,6 +129,90 @@ angular.module("wot").factory('TdParser', ['$http', 'CoAP',
                else
                 return createThingfromNewTd(tdObj);
         }
+		
+		TdParser.extractValueTypesFromContext = function extractValueTypesFromContext(newThing){
+			var contexts = newThing['context'];
+			var nsArray = {};
+			for (var c = 0; c < contexts.length; c++) {
+				var context = contexts[c];
+				var props = Object.keys(context);
+				if (props.length == 1) {
+					var ns = props[0];
+					var url = context[ns];
+					nsArray[url] = ns;
+					$http.get(url).then(function(res) {
+						var requestedUrl = res.config.url;
+						TdParser.readContextCallback(res.data, nsArray[requestedUrl], newThing);
+						return res.data
+					})
+				}
+			}
+			return newThing;			
+		}
+		
+		TdParser.readContextCallback = function readContextCallback(data, ns, newThing) {
+			//console.log(data);
+			for (var i = 0; i < newThing.properties.length; i++) {
+				var p = newThing.properties[i];
+				var vt = p.type;
+				var resolvedType = TdParser.recursiveResolveSchemaType(vt, ns, data);
+				if(resolvedType)
+					p.schema = resolvedType;
+				//p.model = { "value": 0 };
+			}
+			for (var i = 0; i < newThing.actions.length; i++) {
+				var a = newThing.actions[i];
+				var vt = a.type;
+				var resolvedType = TdParser.recursiveResolveSchemaType(vt, ns, data);
+				if (resolvedType)
+					a.schema = resolvedType;
+				//a.model = {"value": [100,100]};
+			}
+			if(newThing.events){
+				for (var i = 0; i < newThing.events.length; i++) {
+					var e = newThing.events[i];
+					var vt = e.type;
+					var resolvedType = TdParser.recursiveResolveSchemaType(vt, ns, data);
+					if (resolvedType)
+						e.schema = resolvedType;
+					//e.model = {};
+				}
+			}
+		}
+
+		TdParser.recursiveResolveSchemaType = function recursiveResolveSchemaType(type, namespace, schemaData) {
+			if(type['$ref']){
+				var referredSchema = type['$ref'];
+				var parts = referredSchema.split(":");
+				var prefix = parts[0];
+				var typename = parts[1];
+				if (referredSchema.startsWith("#/")) {
+					prefix = namespace;
+					typename = referredSchema.split("/")[1];
+				}
+				if(prefix == namespace){
+					if (schemaData[typename]) {
+						var containedType = schemaData[typename];
+						if (containedType.properties) {
+							for (var p in containedType.properties) {
+								var t = containedType.properties[p];
+								if(t['$ref'])
+									containedType.properties[p] = TdParser.recursiveResolveSchemaType(t, namespace, schemaData);
+							}
+						}                  
+						return containedType;
+					}
+					else {
+						return "Error!";
+					}
+				} else {
+					return null;
+				}
+			}
+			else{
+				return type;
+			}
+		} 
 
         TdParser.fromUrl = function fromUrl(url) {
             if (url.substring(0, 4) == 'coap') {
@@ -143,7 +224,7 @@ angular.module("wot").factory('TdParser', ['$http', 'CoAP',
             } else
                 return $http.get(url).then(function(res) {
                     return res.data
-                }).then(TdParser.createThing)
+                }).then(TdParser.createThing).then(TdParser.extractValueTypesFromContext)
         }
 
         TdParser.parseJson = function parseJson(json) {
@@ -155,3 +236,4 @@ angular.module("wot").factory('TdParser', ['$http', 'CoAP',
         return TdParser;
     }
 ]);
+

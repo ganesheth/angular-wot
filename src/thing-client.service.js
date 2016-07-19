@@ -19,6 +19,8 @@ angular.module("wot").factory('ThingClient', ['$http', 'CoAP',
         }
 
         ThingClient.readProperty = function readProperty(thing, property) {
+            
+
             function applyNewValue(value) {
                 property.value = value;
                 property.history.push(value);
@@ -26,10 +28,16 @@ angular.module("wot").factory('ThingClient', ['$http', 'CoAP',
                 //ensure size
                 while (property.history.length >= 20) property.history.shift();
             }
+			
+			function updateValueModel(data) {
+                property.model = data;
+				return data.value;
+            }
 
             if (property.uri) {
                 return restcall('GET', property.uri)
-                    .then(function(res) { return res.data.value })
+                    .then(function(res) { return res.data})
+					.then(updateValueModel)
                     .then(applyNewValue);
             }
 
